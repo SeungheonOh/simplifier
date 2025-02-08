@@ -1,0 +1,96 @@
+cabal-version:   3.0
+name:            simplifier
+version:         0.1.0.0
+
+-- synopsis:
+-- description:
+homepage:        https://plutonomicon.github.io/plutarch-plutus
+license:         BSD-3-Clause
+license-file:    LICENSE
+author:          Seungheon Oh
+maintainer:      seungheon@mlabs.city
+
+-- copyright:
+build-type:      Simple
+extra-doc-files: CHANGELOG.md
+
+-- extra-source-files:
+
+common c
+  default-language:   GHC2021
+  default-extensions:
+    BlockArguments
+    DataKinds
+    DefaultSignatures
+    DeriveAnyClass
+    DerivingStrategies
+    DerivingVia
+    DisambiguateRecordFields
+    DuplicateRecordFields
+    FunctionalDependencies
+    GADTs
+    ImportQualifiedPost
+    ImpredicativeTypes
+    LambdaCase
+    LexicalNegation
+    LiberalTypeSynonyms
+    MonadComprehensions
+    MultiWayIf
+    NegativeLiterals
+    NoFlexibleInstances
+    NoMonomorphismRestriction
+    NoStarIsType
+    NondecreasingIndentation
+    NumDecimals
+    OverloadedLabels
+    OverloadedLists
+    OverloadedRecordDot
+    OverloadedStrings
+    PackageImports
+    PartialTypeSignatures
+    PatternSynonyms
+    QualifiedDo
+    QuantifiedConstraints
+    QuasiQuotes
+    RankNTypes
+    RecordWildCards
+    RecursiveDo
+    RoleAnnotations
+    TypeApplications
+    TypeFamilies
+    TypeFamilyDependencies
+    TypeOperators
+    UnicodeSyntax
+    UnliftedFFITypes
+    UnliftedNewtypes
+    ViewPatterns
+
+  build-depends:      base >=4.9 && <5
+  ghc-options:
+    -Weverything -Wno-unused-do-bind -Wno-missing-kind-signatures
+    -Wno-partial-type-signatures -Werror -Wno-implicit-prelude
+    -Wno-name-shadowing -Wno-unsafe -Wno-missing-safe-haskell-mode
+    -Wno-missing-local-signatures -Wno-prepositive-qualified-module
+    -Wno-missing-import-lists -Wno-monomorphism-restriction
+    -Wno-missed-specialisations -Wno-all-missed-specializations
+    -Wno-unrecognised-warning-flags -Wno-unrecognised-pragmas
+    -Wno-operator-whitespace -fprint-equality-relations
+    -fprint-explicit-kinds -fprint-explicit-foralls
+
+executable simplifier
+  import:           c
+  main-is:          Main.hs
+
+  -- other-modules:
+  -- other-extensions:
+  build-depends:
+    , base16-bytestring
+    , bytestring
+    , plutus-core
+    , text
+
+  -- This makes haskell.nix use latest staging version of plutarch up to flake input's commit.
+  -- Run `nix flake update` to bump hackage set. It is recommended to use versioned release
+  -- and regularly run `nix flake update`.
+  hs-source-dirs:   app
+  default-language: Haskell2010
