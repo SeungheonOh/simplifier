@@ -89,6 +89,7 @@ executable simplifier
     , base16-bytestring
     , bytestring
     , containers
+    , mtl
     , plutus-core
     , prettyprinter
     , tasty
