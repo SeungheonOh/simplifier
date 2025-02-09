@@ -90,7 +90,10 @@ Unfortunately, it will be more complicated to make @simplify@ traverse AST nodes
 reduction) are possible. This is mainly due to the fact that we need to first know rather or not beta-reduction can be done,
 so we need to traverse to see if there's zero or one bind first and than do substitution.
 
-I do have some fun ideas regarding making this more efficient, but for the sake of simplicity, I will proceed with this.
+I do have some fun ideas regarding making this more efficient, but for the sake of simplicity, I will proceed with this. To
+elaborate little on the idea, it is possible to have variables as continuation which will make it possible apply to term
+in place. Convert @Apply () (Var () (DeBruijn 1)) (Var () (DeBruijn 2))@ into @\f -> Apply () (f 1) (f 0)@ in which case
+we can apply just by giving appropriate continuation.
 
 Limitations and deficiency of this implementation can be found at the bottom of this file.
 -}
@@ -272,7 +275,7 @@ to see if @simplifer@ does anything stupid and also to see if anything actually 
 https://github.com/Plutonomicon/plutarch-plutus/compare/staging...seungheonoh/simplifierExperiment
 Upon inspecting the diffs in benchmark goldens, you will be able to observe pretty significant optimizations.
 
-There are few deficiency(pretty critical ones in fact) in this simplify if we were to use this in actual UPLC:
+There are few deficiency(pretty critical ones in fact) in this @simplify@ if we were to use this in actual UPLC:
 
 Firstly, for UPLC specifically, with @Error@ term making it somewhat effectful, truncating unused argument
 (via beta-reduction) is dangerous. As of now, @simplify@ implies all terms to be "pure", so it will simplify
