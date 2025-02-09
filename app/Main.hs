@@ -19,6 +19,14 @@ import Test.Tasty.HUnit
 import UntypedPlutusCore
 import UntypedPlutusCore.Parser
 
+newtype Or = Or {unOr :: Bool}
+
+instance Semigroup Or where
+  x <> y = Or $ unOr x || unOr y
+
+instance Monoid Or where
+  mempty = Or False
+
 -- Very convenient
 termFromText :: Text -> Term DeBruijn DefaultUni DefaultFun ()
 termFromText str =
@@ -44,13 +52,17 @@ In addition, we also re-calculate DeBruijn level here. This is to reduce number 
 -}
 applyTopLam ::
   Term DeBruijn DefaultUni DefaultFun () ->
-  ([Integer], Term DeBruijn DefaultUni DefaultFun ()) ->
-  ([Integer], Term DeBruijn DefaultUni DefaultFun ())
-applyTopLam target (argUsed, arg) = subst' 0 target
+  ((Or, [Integer]), Term DeBruijn DefaultUni DefaultFun ()) ->
+  ((Or, [Integer]), Term DeBruijn DefaultUni DefaultFun ())
+applyTopLam target ((argEffectful, argUsed), arg) = subst' 0 target
   where
     -- Increment the free variables by given amount, leave bound variables unchanged.
     -- Some of the utilities from UntypedPlutusCore can be used here, but I implemented everything from scratch.
-    incrementTerm :: Word64 -> Word64 -> Term DeBruijn DefaultUni DefaultFun () -> Term DeBruijn DefaultUni DefaultFun ()
+    incrementTerm ::
+      Word64 ->
+      Word64 ->
+      Term DeBruijn DefaultUni DefaultFun () ->
+      Term DeBruijn DefaultUni DefaultFun ()
     incrementTerm d incrAmount org@(Var () (DeBruijn (Index idx)))
       | idx <= d = org
       | otherwise = Var () (DeBruijn (Index $ idx + incrAmount))
@@ -59,28 +71,31 @@ applyTopLam target (argUsed, arg) = subst' 0 target
     incrementTerm d incrAmount (Force () t) = Force () (incrementTerm d incrAmount t)
     incrementTerm d incrAmount (Delay () t) = Delay () (incrementTerm d incrAmount t)
     incrementTerm d incrAmount (Constr () idx ts) = Constr () idx (incrementTerm d incrAmount <$> ts)
-    incrementTerm d incrAmount (Case () t ts) = Case () (incrementTerm d incrAmount t) (incrementTerm d incrAmount <$> ts)
+    incrementTerm d incrAmount (Case () t ts) =
+      Case () (incrementTerm d incrAmount t) (incrementTerm d incrAmount <$> ts)
     incrementTerm _ _ x = x
 
     -- argument @d@ tracks the "depth" of abstractions. When we face @LamAbs@, this will be incremented.
-    subst' :: Integer -> Term DeBruijn DefaultUni DefaultFun () -> ([Integer], Term DeBruijn DefaultUni DefaultFun ())
+    subst' :: Integer -> Term DeBruijn DefaultUni DefaultFun () -> ((Or, [Integer]), Term DeBruijn DefaultUni DefaultFun ())
     subst' d x@(Var () (DeBruijn (Index (toInteger -> n)))) =
       case compare (n - d) 1 of
         -- This is the target variable we want to apply to. Since this is being inlined, we need to increment
         -- the indices of the free variables by @d@.
         -- Also, we subtract $d$ from each of DeBruijn level as now it's displaced further by amount @d@.
-        EQ -> ((- d) <$> argUsed, incrementTerm 0 (fromInteger d) arg)
+        EQ -> ((argEffectful, (- d) <$> argUsed), incrementTerm 0 (fromInteger d) arg)
         -- We don't need to change variable if it's bounded and not the target variable
-        LT -> ([1 - n], x)
+        LT -> ((Or False, [1 - n]), x)
         -- We need to decrement index by one if it's free variable.
-        GT -> ([1 - (n - 1)], Var () (DeBruijn (Index $ fromInteger $ n - 1)))
-    subst' d (LamAbs () v t) = let (used', t') = subst' (d + 1) t in ((+ 1) <$> used', LamAbs () v t')
+        GT -> ((Or False, [1 - (n - 1)]), Var () (DeBruijn (Index $ fromInteger $ n - 1)))
+    subst' d (LamAbs () v t) = let ((effectful, used'), t') = subst' (d + 1) t in ((effectful, (+ 1) <$> used'), LamAbs () v t')
     subst' d (Apply () f t) = Apply () <$> subst' d f <*> subst' d t
     subst' d (Force () t) = Force () <$> subst' d t
     subst' d (Delay () t) = Delay () <$> subst' d t
     subst' d (Constr () idx ts) = Constr () idx <$> traverse (subst' d) ts
     subst' d (Case () t ts) = Case () <$> subst' d t <*> traverse (subst' d) ts
-    subst' _ x = (mempty, x)
+    subst' _ org@(Builtin _ _) = ((Or True, mempty), org)
+    subst' _ org@(Error _) = ((Or True, mempty), org)
+    subst' _ org@(Constant _ _) = ((Or False, mempty), org)
 
 {- |
 This is the actual simplify function. I tried to make it do minimal traversal of AST.
@@ -101,22 +116,22 @@ simplify = snd . go
     -- We will use this list of DeBruijn level to count number of variable used in the body of abstraction.
     -- DeBruijn level assigns 1 to the outer most abstraction, so when we run @go@ on the body of abstraction
     -- and we can count number of @0@ to see how many times the corresponding variable is used.
-    go :: Term DeBruijn DefaultUni DefaultFun () -> ([Integer], Term DeBruijn DefaultUni DefaultFun ())
+    go :: Term DeBruijn DefaultUni DefaultFun () -> ((Or, [Integer]), Term DeBruijn DefaultUni DefaultFun ())
     -- Handle integer addition and equality, nothing special here. If given constant is of incorrect type,
     -- don't do anything and keep original.
     go org@(Apply () (Apply () (Builtin () PLC.AddInteger) x) y) = do
       (,) <$> go x <*> go y >>= \case
         (x'@(Constant _ _), y'@(Constant _ _)) ->
           case (PLC.readKnownConstant x', PLC.readKnownConstant y') of
-            (Right x'', Right y'') -> (mempty, Constant () $ PLC.someValue @Integer (x'' + y''))
-            _ -> (mempty, org)
+            (Right x'', Right y'') -> ((Or False, mempty), Constant () $ PLC.someValue @Integer (x'' + y''))
+            _ -> ((Or True, mempty), org)
         (x', y') -> pure (Apply () (Apply () (Builtin () PLC.AddInteger) x') y')
     go org@(Apply () (Apply () (Builtin () PLC.EqualsInteger) x) y) =
       (,) <$> go x <*> go y >>= \case
         (x'@(Constant _ _), y'@(Constant _ _)) ->
           case (PLC.readKnownConstant @_ @Integer x', PLC.readKnownConstant @_ @Integer y') of
-            (Right x'', Right y'') -> (mempty, Constant () $ PLC.someValue @Bool (x'' == y''))
-            _ -> (mempty, org)
+            (Right x'', Right y'') -> ((Or False, mempty), Constant () $ PLC.someValue @Bool (x'' == y''))
+            _ -> ((Or True, mempty), org)
         (x', y') -> pure (Apply () (Apply () (Builtin () PLC.EqualsInteger) x') y')
     -- Handle IfThenElse. Mostly similar with integer addition/equality. But for this one, we want
     -- to also simplify each cases of IfThenElse.
@@ -136,33 +151,33 @@ simplify = snd . go
     go (Apply () (LamAbs () v f) arg) =
       let
         -- We use @lamUsed@ here to check number of times the variable bound to current abstraction is used.
-        (lamUsed, lamSimplified) = go f
-        argBoth@(argUsed, argSimplified) = go arg
+        ((lamEffectful, lamUsed), lamSimplified) = go f
+        argBoth@((argEffectful, argUsed), argSimplified) = go arg
        in
         -- Only reduce when variable is used zero or one time.
         case argSimplified of
           -- When argument is constant, always reduce.
           c@(Constant _ _) ->
             -- Here we discard @_lamUsed@ because @applyTopLam@ recalculates DeBruijn level.
-            let (_lamUsed, lamSimplified) = go f
+            let ((_, _lamUsed), lamSimplified) = go f
              in -- no need to modify index of variable being applied since it is outside of abstraction
                 -- This should be @applyTopLam (snd $ go f) (mempty, c)@ but I wrote it out for better clarity
                 applyTopLam lamSimplified (mempty, c)
           -- When argument is variable, always reduce.
           v@(Var _ (DeBruijn (Index i))) ->
-            let (_lamUsed, lamSimplified) = go f
-             in applyTopLam lamSimplified ([1 - toInteger i], v)
+            let ((_, _lamUsed), lamSimplified) = go f
+             in applyTopLam lamSimplified ((Or False, [1 - toInteger i]), v)
           _ ->
-            if length (filter (== 0) lamUsed) <= 1
+            if length (filter (== 0) lamUsed) == 1 || (0 `notElem` lamUsed && not (unOr argEffectful))
               then applyTopLam lamSimplified argBoth
               else -- Here, we increment each elements of @lamUsed@ since no reduction was performed.
-                (((+ 1) <$> lamUsed) <> argUsed, Apply () (LamAbs () v lamSimplified) argSimplified)
+                ((lamEffectful <> argEffectful, ((+ 1) <$> lamUsed) <> argUsed), Apply () (LamAbs () v lamSimplified) argSimplified)
     -- BeBruijn level starts from @1 - v@ and on each encounter of abstraction, they get incremented.
     -- Variables that binds to first abstraction will get level 1, second will get 2 and so on.
     -- First free variable gets level 0. Hence, when finding "target" variable on the abstraction body,
     -- we can just count number of zeros.
-    go org@(Var () (DeBruijn (Index v))) = ([1 - toInteger v], org)
-    go (LamAbs () v t) = let (used', t') = go t in ((+ 1) <$> used', LamAbs () v t')
+    go org@(Var () (DeBruijn (Index v))) = ((Or False, [1 - toInteger v]), org)
+    go (LamAbs () v t) = let ((effectful, used'), t') = go t in ((effectful, (+ 1) <$> used'), LamAbs () v t')
     -- Handles applications, function and argument needs to be simplified as well.
     -- We also check if function gets reduced into an abstraction, in which case we want to attempt to
     -- simplify once more. This is so that functions like @[[(lam x x) (lam x x)] [(lam x x) (lam x x)]]@
@@ -178,9 +193,9 @@ simplify = snd . go
     -- Nothing interesting here.
     go (Force () t) = Force () <$> go t
     go (Delay () t) = Delay () <$> go t
-    go org@(Constant _ _) = (mempty, org)
-    go org@(Builtin _ _) = (mempty, org)
-    go org@(Error ()) = (mempty, org)
+    go org@(Constant _ _) = ((Or False, mempty), org)
+    go org@(Builtin _ _) = ((Or True, mempty), org)
+    go org@(Error ()) = ((Or True, mempty), org)
     -- It is possible to do further optimization on SOP terms. Namely reducing @(case (constr 1 ...) a b c)@
     -- to @b ...@. This should be somewhat trivial.
     go (Constr () idx ts) = Constr () idx <$> traverse go ts
@@ -260,10 +275,14 @@ tests =
     , simplifiesTo'
         (Apply () (LamAbs () (DeBruijn 0) (Apply () (Var () (DeBruijn 1)) (Var () (DeBruijn 1)))) (Var () (DeBruijn 2)))
         (Apply () (Var () (DeBruijn 2)) (Var () (DeBruijn 2)))
-    , -- Dangerous
+    , -- Now this is safe and well.
       simplifiesTo
         "[(lam a (con integer 30)) (error)]"
-        "(con integer 30)"
+        "[(lam a (con integer 30)) (error)]"
+    , -- Now this is safe and well.
+      simplifiesTo
+        "[(lam a a) (error)]"
+        "(error)"
     ]
 
 {-
