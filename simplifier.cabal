@@ -75,10 +75,12 @@ common c
     -Wno-missed-specialisations -Wno-all-missed-specializations
     -Wno-unrecognised-warning-flags -Wno-unrecognised-pragmas
     -Wno-operator-whitespace -fprint-equality-relations
-    -fprint-explicit-kinds -fprint-explicit-foralls
+    -fprint-explicit-kinds -fprint-explicit-foralls -ddump-simpl
+    -ddump-to-file -Wno-unused-packages
 
 executable simplifier
   import:           c
+  ghc-options:      -ddump-simpl -ddump-to-file
   main-is:          Main.hs
 
   -- other-modules:
@@ -86,8 +88,14 @@ executable simplifier
   build-depends:
     , base16-bytestring
     , bytestring
+    , containers
     , plutus-core
+    , prettyprinter
+    , tasty
+    , tasty-hunit
     , text
+    , transformers
+    , vector
 
   -- This makes haskell.nix use latest staging version of plutarch up to flake input's commit.
   -- Run `nix flake update` to bump hackage set. It is recommended to use versioned release
