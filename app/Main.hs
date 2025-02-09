@@ -96,7 +96,7 @@ in place. Convert @Apply () (Var () (DeBruijn 1)) (Var () (DeBruijn 2))@ into @\
 we can apply just by giving appropriate continuation.
 
 UPDATE: I tried this in "seungheonoh/test" branch, although I didn't get it fully working. I'd need to do actual
-profiling, but it also feels slower to run continuation version
+profiling, but it also feels slower to run continuation version.
 
 Limitations and deficiency of this implementation can be found at the bottom of this file.
 -}
@@ -126,17 +126,20 @@ simplify = snd . go
         (x', y') -> pure (Apply () (Apply () (Builtin () PLC.EqualsInteger) x') y')
     -- Handle IfThenElse. Mostly similar with integer addition/equality. But for this one, we want
     -- to also simplify each cases of IfThenElse.
-    go (Apply () (Apply () (Apply () (Builtin () PLC.IfThenElse) cond@(Constant _ _)) x) y) =
-      case PLC.readKnownConstant cond of
-        Right cond' ->
-          if cond'
-            then go x
-            else go y
-        _ -> do
-          -- We only need to take DeBruijn levels from both branches when we can't simplify IfThenElse.
+    go (Apply () (Apply () (Apply () (Builtin () PLC.IfThenElse) cond) x) y) =
+      go cond >>= \case
+        cond'@(Constant _ _) ->
+          case PLC.readKnownConstant cond' of
+            Right True -> go x
+            Right False -> go y
+            _ -> do
+              x' <- go x
+              y' <- go y
+              pure (Apply () (Apply () (Apply () (Builtin () PLC.IfThenElse) cond) x') y')
+        cond' -> do
           x' <- go x
           y' <- go y
-          pure (Apply () (Apply () (Apply () (Builtin () PLC.IfThenElse) cond) x') y')
+          pure (Apply () (Apply () (Apply () (Builtin () PLC.IfThenElse) cond') x') y')
 
     -- Beta-reduction for variable that's only been used zero or one time.
     go (Apply () (LamAbs () v f) arg) =
@@ -235,6 +238,9 @@ tests =
       simplifiesTo
         "[(builtin addInteger) [(lam x x) (con integer 20)] (con integer 30)]"
         "(con integer 50)"
+    , simplifiesTo
+        "[(builtin addInteger) [(builtin addInteger) (con integer 20) (con integer 30)] (con integer 30)]"
+        "(con integer 80)"
     , -- remain unchanged when both arguments are not constant integers
       simplifiesTo
         "[(builtin addInteger) (con bool False) (con integer 30)]"
@@ -259,6 +265,15 @@ tests =
       simplifiesTo
         "(lam a (lam b [(lam x [x x]) [(builtin addInteger) (con integer 10) (con integer 20)]]))"
         "(lam a (lam b [(con integer 30) (con integer 30)]))"
+    , -- if statement tests
+      simplifiesTo "[(builtin ifThenElse) (con bool True) (con integer 1) (con integer 2)]" "(con integer 1)"
+    , simplifiesTo "[(builtin ifThenElse) (con bool False) (con integer 1) (con integer 2)]" "(con integer 2)"
+    , simplifiesTo
+        "[(builtin ifThenElse) [(lam x x) (con bool False)] [(lam x x) (con integer 1)] [(lam x x) (con integer 2)]]"
+        "(con integer 2)"
+    , simplifiesTo
+        "[(builtin ifThenElse) [(builtin equalsInteger) (con integer 4) (con integer 2)] [(lam x x) (con integer 1)] [(lam x x) (con integer 2)]]"
+        "(con integer 2)"
     , -- free variables arguments can still be reduced
       simplifiesTo'
         (Apply () (LamAbs () (DeBruijn 0) (Var () (DeBruijn 1))) (Var () (DeBruijn 3)))
@@ -297,6 +312,11 @@ will extraneously repeat computation of @y + y + y + y + y@ 100 times which orig
 This is difficult to detect; some sort of static analysis would be required to determine when and when not to reduce. I won't
 demonstrate if this can be done or not as it is significant undertaking. However, my intuition suggests me that this would be
 better feasible in more abstracted IR(like plutus-ir or covenant) where recursion is handled at IR level.
+
+Lastly, for actual UPLC usages, in many cases, we can just run CEK on closed sub term to instead of handling each builtins
+as I did.
+
+Also, this would've been much readable and easier if I just used @Name@ instead of @DeBruijn@... maybe I should've done that.
 -}
 
 main :: IO ()
