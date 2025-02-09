@@ -30,12 +30,15 @@ termFromText str =
     Left err -> error (show err)
 
 {- |
-@applyTopLam@ applies provide argument to a body of lambda abstraction. Noticeably, this function does two things:
+@applyTopLam@ applies provide argument to a body of lambda abstraction. Noticeably, this function does few things:
 - Run down through AST and change any @Var@ constructor that binds to abstraction we are applying to.
   This is obvious, it's actual application part.
-- Adjust free @Var@s to have correct indices.
+- Adjust free @Var@s to have correct indices for variables in function.
   Since application means we are taking out one abstraction(the one we are applying to), any free variables that bind to
   "outside" abstraction need have their indices reduced by one.
+- Adjust free @Var@s to have correctly shifted indices for variables in argument.
+  When we inline argument, any free variables in the argument must be adjusted as the location of in-lining can be
+  inside of other abstractions. So, we just add "depth" of abstraction to any free variables within argument.
 
 In addition, we also re-calculate DeBruijn level here. This is to reduce number of times we need to iterate AST.
 -}
@@ -80,17 +83,19 @@ applyTopLam target (argUsed, arg) = subst' 0 target
     subst' _ x = (mempty, x)
 
 {- |
-This is the actual simplifier function. I tried to make it do minimal iteration of AST.
-Currently, it will only iterate each node once provided that given term is fully simplified.
+This is the actual simplify function. I tried to make it do minimal traversal of AST.
+Currently, it will only traverse each node once provided that given term is fully simplified.
 
-Unfortunately, it is not possible to make @simplifier@ iterate AST nodes once when simplifications(specifically beta
-reduction) are possible. This is mainly due to the fact that we need to first know rather or not we need beta-reduction, so
-we need to iterate to see if there's zero or one bind first and than do substitution.
+Unfortunately, it will be more complicated to make @simplify@ traverse AST nodes once when simplifications(specifically beta
+reduction) are possible. This is mainly due to the fact that we need to first know rather or not beta-reduction can be done,
+so we need to traverse to see if there's zero or one bind first and than do substitution.
 
-@simplifier@ works with
+I do have some fun ideas regarding making this more efficient, but for the sake of simplicity, I will proceed with this.
+
+Limitations and deficiency of this implementation can be found at the bottom of this file.
 -}
-simplifier :: Term DeBruijn DefaultUni DefaultFun () -> Term DeBruijn DefaultUni DefaultFun ()
-simplifier = snd . go
+simplify :: Term DeBruijn DefaultUni DefaultFun () -> Term DeBruijn DefaultUni DefaultFun ()
+simplify = snd . go
   where
     -- @go@ returns list of all variables in DeBruijn level and simplified term.
     -- We will use this list of DeBruijn level to count number of variable used in the body of abstraction.
@@ -182,91 +187,111 @@ simplifier = snd . go
     go (Case () t ts) = Case () <$> go t <*> traverse go ts
 
 -- I will not make a futile attempt to write out some property testing here. However, if I were to implement it, I would
--- generate arbitrary term(call it @t@) and argument(call it @x@) to check @eval (t x) == eval (simplifier t $ x)@.
+-- generate arbitrary term(call it @t@) and argument(call it @x@) to check @eval (t x) == eval (simplify t $ x)@.
 -- Generating proper arbitrary UPLC will be very difficult. So, instead, here are some tests:
 
 simplifiesTo :: Text -> Text -> TestTree
 simplifiesTo x y = testCase (T.unpack $ x <> " simplifies to " <> y) $ do
-  simplifier (termFromText x) @?= termFromText y
+  simplify (termFromText x) @?= termFromText y
 
 simplifiesTo' :: Term DeBruijn DefaultUni DefaultFun () -> Term DeBruijn DefaultUni DefaultFun () -> TestTree
 simplifiesTo' x y = testCase (show $ pretty x <> " simplifies to " <> pretty y) $ do
-  simplifier x @?= y
+  simplify x @?= y
 
 tests :: TestTree
 tests =
   testGroup
     "Simplifier"
-    [ simplifiesTo "[[(lam x x) (lam x x)] [(lam x x) (lam x x)]]" "(lam x x)"
+    [ -- Beta reductions
+      simplifiesTo "[[(lam x x) (lam x x)] [(lam x x) (lam x x)]]" "(lam x x)"
     , simplifiesTo "(lam a (lam b [(lam x [(lam y y) x]) [a b]]))" "(lam x (lam y [x y]))"
     , simplifiesTo "(lam a (lam b [(lam c c) [a b]]))" "(lam c (lam d [c d]))"
-    , -- \^ Beta reductions
-
+    , -- simplify builtin equalsInteger when both arguments are constant integers
       simplifiesTo "[(builtin equalsInteger) (con integer 20) (con integer 30)]" "(con bool False)"
-    , -- \^ simplify builtin equalsInteger when both arguments are constant integers
+    , -- simplify builtin equalsInteger when both arguments are constant integers, nested
       simplifiesTo
         "[(builtin equalsInteger) [(lam x x) (con integer 20)] (con integer 30)]"
         "(con bool False)"
-    , -- \^ simplify builtin equalsInteger when both arguments are constant integers, nested
+    , -- remain unchanged when both arguments are not constant integers
       simplifiesTo
         "[(builtin equalsInteger) (con bool True) (con integer 30)]"
         "[(builtin equalsInteger) (con bool True) (con integer 30)]"
     , simplifiesTo
         "(lam x [(builtin equalsInteger) [x (con integer 20)] (con integer 30)])"
         "(lam x [(builtin equalsInteger) [x (con integer 20)] (con integer 30)])"
-    , -- \^ remain unchanged when both arguments are not constant integers
+    , -- remain unchanged when both arguments are not constant integers, nested
       simplifiesTo
         "(lam x [(builtin equalsInteger) [(lam y y) x] (con integer 30)])"
         "(lam x [(builtin equalsInteger) x (con integer 30)])"
-    , -- \^ remain unchanged when both arguments are not constant integers, nested
-
+    , -- simplify builtin addInteger when both arguments are constant integers
       simplifiesTo "[(builtin addInteger) (con integer 20) (con integer 30)]" "(con integer 50)"
-    , -- \^ simplify builtin addInteger when both arguments are constant integers
+    , -- simplify builtin addInteger when both arguments are constant integers, nested
       simplifiesTo
         "[(builtin addInteger) [(lam x x) (con integer 20)] (con integer 30)]"
         "(con integer 50)"
-    , -- \^ simplify builtin addInteger when both arguments are constant integers, nested
+    , -- remain unchanged when both arguments are not constant integers
       simplifiesTo
         "[(builtin addInteger) (con bool False) (con integer 30)]"
         "[(builtin addInteger) (con bool False) (con integer 30)]"
     , simplifiesTo
         "(lam x [(builtin addInteger) [x (con bool False)] (con integer 30)])"
         "(lam x [(builtin addInteger) [x (con bool False)] (con integer 30)])"
-    , -- \^ remain unchanged when both arguments are not constant integers
+    , -- remain unchanged when both arguments are not constant integers, nested
       simplifiesTo
         "(lam x [(builtin addInteger) [(lam y y) x] (con integer 30)])"
         "(lam x [(builtin addInteger) x (con integer 30)])"
-    , -- \^ remain unchanged when both arguments are not constant integers, nested
-
+    , -- constant argument always get reduced
       simplifiesTo "[(lam x [x x]) (con integer 42)]" "[(con integer 42) (con integer 42)]"
     , simplifiesTo "[(lam x [x x x]) (con integer 42)]" "[(con integer 42) (con integer 42) (con integer 42)]"
-    , -- \^ constant argument always get reduced
-
+    , -- variable argument always get reduced
       simplifiesTo "(lam y [(lam x [x x]) y])" "(lam y [y y])"
     , simplifiesTo "(lam y [(lam x [x x x]) y])" "(lam y [y y y])"
-    , -- \^ variable argument always get reduced
-
+    , -- argument that is not variable nor constant will only get reduced if they occur zero or once.
       simplifiesTo "(lam a (lam b [(lam x x) [a b]]))" "(lam a (lam b [a b]))"
     , simplifiesTo "(lam a (lam b [(lam x [x x]) [a b]]))" "(lam a (lam b [(lam x [x x]) [a b]]))"
-    , -- \^ argument that is not variable nor constant will only get reduced if they occur zero or once.
-
+    , -- argument will get simplified first in nested cases.
       simplifiesTo
         "(lam a (lam b [(lam x [x x]) [(builtin addInteger) (con integer 10) (con integer 20)]]))"
         "(lam a (lam b [(con integer 30) (con integer 30)]))"
-    , -- \^ argument will get simplified first in nested cases.
-
+    , -- free variables arguments can still be reduced
       simplifiesTo'
         (Apply () (LamAbs () (DeBruijn 0) (Var () (DeBruijn 1))) (Var () (DeBruijn 3)))
         (Var () (DeBruijn 3))
     , simplifiesTo'
         (Apply () (LamAbs () (DeBruijn 0) (Apply () (Var () (DeBruijn 1)) (Var () (DeBruijn 1)))) (Var () (DeBruijn 2)))
         (Apply () (Var () (DeBruijn 2)) (Var () (DeBruijn 2)))
+    , -- Dangerous
+      simplifiesTo
+        "[(lam a (con integer 30)) (error)]"
+        "(con integer 30)"
     ]
 
--- \^ free variables arguments can still be reduced
+{-
+Okay, I can pull together more cases, but it's rather laborious. So, instead, I leveraged Plutarch's 864 test cases
+to see if @simplifer@ does anything stupid and also to see if anything actually gets optimized:
+https://github.com/Plutonomicon/plutarch-plutus/compare/staging...seungheonoh/simplifierExperiment
+Upon inspecting the diffs in benchmark goldens, you will be able to observe pretty significant optimizations.
 
--- Okay, I can pull together more cases, but it's rather laborious. So, instead, I leveraged Plutarch's 864 test cases
--- to see if @simplifer@ does anything stupid and also to see if anything actually gets optimized:
+There are few deficiency(pretty critical ones in fact) in this simplify if we were to use this in actual UPLC:
+
+Firstly, for UPLC specifically, with @Error@ term making it somewhat effectful, truncating unused argument
+(via beta-reduction) is dangerous. As of now, @simplify@ implies all terms to be "pure", so it will simplify
+@[(lam a (con integer 30)) (error)]@ to @(con integer 30)@ which we don't want for very clear reasons. This can be fixed
+rather easily. I will demonstrate this in "seungheonoh/handleEffectfulTerm" branch.
+
+Secondly, beta-reducing arguments that is only being used once doesn't always guarantee performance improvement; especially
+with regards to execution units. Consider example in pseudocode:
+@@
+bob = (\y -> (\x -> add (replicate 100 x)) (y + y + y + y + y))
+
+simplify bob => (\y -> add (replicate 100 (y + y + y + y + y)))
+@@
+In this case @bob@ is more efficient than @simplify bob@ in terms of execution unit(of CEK machine). Simplified @bob@
+will extraneously repeat computation of @y + y + y + y + y@ 100 times which original @bob@ prevented by having abstraction.
+This is difficult to detect; some sort of static analysis would be required to determine when and when not to reduce. I won't
+demonstrate if this can be done or not as it is significant undertaking. However, my intuition suggests me that this would be
+better feasible in more abstracted IR(like plutus-ir or covenant) where recursion is handled at IR level.
+-}
 
 main :: IO ()
 main = defaultMain tests
