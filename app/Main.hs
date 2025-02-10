@@ -64,7 +64,9 @@ applyTopLam target (argUsed, arg) = subst' 0 target
 --   simplifiesTo "[[(lam x x) (lam x x)] [(lam x x) (lam x x)]]" "(lam x x)"
 -- , simplifiesTo "(lam a (lam b [(lam x [(lam y y) x]) [a b]]))" "(lam x (lam y [x y]))"
 
--- $> pretty $ simplifya $ termFromText "(lam a (lam b [(lam x [x x]) [a b]]))"
+-- $> pretty $ simplifya $ termFromText "(lam a (lam b [(lam x [(lam y y) x]) [a b]]))"
+
+-- $> pretty $ simplifya $ termFromText "(lam a (lam b [(lam x x) a]))"
 
 simplifya :: Term DeBruijn DefaultUni DefaultFun () -> Term DeBruijn DefaultUni DefaultFun ()
 simplifya x = snd $ runCont (go 0 x) (\(d, v) -> ([d - v + 1], Var () (DeBruijn $ Index $ fromInteger v)))
@@ -97,16 +99,16 @@ simplifya x = snd $ runCont (go 0 x) (\(d, v) -> ([d - v + 1], Var () (DeBruijn 
           x' <- runCont (go d x) r
           y' <- runCont (go d y) r
           pure (Apply () (Apply () (Apply () (Builtin () PLC.IfThenElse) cond) x') y')
-    go d (Apply () (LamAbs () v lam) arg) = cont $ \r ->
+    go d org@(Apply () (LamAbs () v lam) arg) = cont $ \r ->
       let
         lam' = go d lam
         arg' = go d arg
         updateArg incr (d', v')
-          | d' - v' <= d = r (d', v')
-          | otherwise = ([d' - v'], Var () (DeBruijn $ Index $ fromInteger (v' + incr)))
+          | d' - d < v' = r (d', v' + incr)
+          | otherwise = r (d', v')
         apply (d', v')
-          | d' - v' + 1 == d = runCont arg' (updateArg $ d' - d)
-          | d' - v' > d = r (d', v' - 1)
+          | (d' - d) == v' - 1 = runCont arg' (updateArg $ d' - d)
+          | (d' - d) < v' - 1 = r (d', v' - 1)
           | otherwise = r (d' - 1, v')
        in
         case snd $ runCont arg' r of
@@ -117,22 +119,22 @@ simplifya x = snd $ runCont (go 0 x) (\(d, v) -> ([d - v + 1], Var () (DeBruijn 
               then runCont lam' apply
               else Apply () <$> (LamAbs () v <$> runCont lam' (\(x, y) -> r (x + 1, y))) <*> runCont arg' r
     go d (Var () (DeBruijn (Index (toInteger -> v)))) = cont (\f -> f (d, v))
-    go d (LamAbs () v t) = cont (\r -> LamAbs () v <$> runCont (go (d + 1) t) r)
+    go d (LamAbs () v t) = cont (fmap (LamAbs () v) . runCont (go (d + 1) t))
     go d (Apply () f t) = cont $ \r -> do
       f' <- runCont (go d f) r
       t' <- runCont (go d t) r
       case f' of
-        (LamAbs _ _ _) -> runCont (go d (Apply () f' t')) r
+        LamAbs {} -> runCont (go d (Apply () f' t')) r
         _ -> pure $ Apply () f' t'
-    go d (Force () t) = cont (\r -> Force () <$> runCont (go d t) r)
-    go d (Delay () t) = cont (\r -> Delay () <$> runCont (go d t) r)
+    go d (Force () t) = cont (fmap (Force ()) . runCont (go d t))
+    go d (Delay () t) = cont (fmap (Delay ()) . runCont (go d t))
     go d org@(Constant _ _) = cont $ const (mempty, org)
     go d org@(Builtin _ _) = cont $ const (mempty, org)
     go d org@(Error ()) = cont $ const (mempty, org)
     go d (Constr () idx ts) =
-      cont (\r -> Constr () idx <$> traverse (flip runCont r) (fmap (go d) ts))
+      cont (\r -> Constr () idx <$> traverse (flip runCont r . go d) ts)
     go d (Case () t ts) =
-      cont (\r -> Case () <$> runCont (go d t) r <*> traverse (flip runCont r) (fmap (go d) ts))
+      cont (\r -> Case () <$> runCont (go d t) r <*> traverse (flip runCont r . go d) ts)
 
 simplify :: Term DeBruijn DefaultUni DefaultFun () -> Term DeBruijn DefaultUni DefaultFun ()
 simplify = snd . simplify'
